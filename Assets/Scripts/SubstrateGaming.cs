@@ -1,11 +1,15 @@
-using System;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
+using Schnorrkel.Keys;
 using Substrate.NetApi;
 using Substrate.NetApi.Model.Extrinsics;
+using Substrate.NetApi.Model.Rpc;
+using Substrate.NetApi.Model.Types;
+using Substrate.NetApi.Model.Types.Base;
 using Substrate.NetApi.Model.Types.Primitive;
-
+using System;
+using System.Linq;
+using System.Numerics;
+using System.Threading;
+using System.Threading.Tasks;
 using TMPro;
 using UnityEngine;
 
@@ -13,6 +17,7 @@ using AjunaExt = Substrate.Ajuna.NET.NetApiExt.Generated;
 using AstarExt = Substrate.Astar.NET.NetApiExt.Generated;
 using BajunExt = Substrate.Bajun.NET.NetApiExt.Generated;
 using KusamaExt = Substrate.Kusama.NET.NetApiExt.Generated;
+using NodeTemplateExt = Substrate.NodeTemplate.NET.NetApiExt.Generated;
 using PolkadotExt = Substrate.Polkadot.NET.NetApiExt.Generated;
 using StatemineExt = Substrate.Statemine.NET.NetApiExt.Generated;
 using StatemintExt = Substrate.Statemint.NET.NetApiExt.Generated;
@@ -21,6 +26,11 @@ namespace Substrate
 {
     public class SubstrateGaming : MonoBehaviour
     {
+        public static MiniSecret MiniSecretAlice => new MiniSecret(Utils.HexToByteArray("0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a"), ExpandMode.Ed25519);
+        public static Account Alice => Account.Build(KeyType.Sr25519, MiniSecretAlice.ExpandToSecret().ToBytes(), MiniSecretAlice.GetPair().Public.Key);
+
+        private ChargeType _chargeTypeDefault;
+
         public enum SubstrateChains
         {
             Polkadot,
@@ -29,7 +39,8 @@ namespace Substrate
             Astar,
             Bajun,
             Statemine,
-            Statemint
+            Statemint,
+            NodeTemplate
         }
 
         [SerializeField]
@@ -40,6 +51,9 @@ namespace Substrate
 
         [SerializeField]
         private UnityEngine.UI.Button _getBlockNumberBtn;
+
+        [SerializeField]
+        private UnityEngine.UI.Button _sendBobBtn;
 
         [SerializeField]
         private TMP_Text _urlLbl;
@@ -53,7 +67,9 @@ namespace Substrate
 
         private Func<CancellationToken, Task<U32>> SystemStorageNumber { get; set; }
 
-        private Uri GetUri(string url) => new("wss://" + url);
+        private Uri GetUri(string url, bool secure = true) => new($"ws{(secure ? "s" : "")}://" + url);
+
+        private SubstrateChains _currentNetwork;
 
         /// <summary>
         ///
@@ -68,10 +84,14 @@ namespace Substrate
         /// </summary>
         private void Start()
         {
+            //_chargeTypeDefault = ChargeTransactionPayment.Default();
+            _chargeTypeDefault = ChargeAssetTxPayment.Default();
+
             // initialize
             OnValueChanged(_dropdown);
 
             _getBlockNumberBtn.enabled = false;
+            _sendBobBtn.enabled = false;
             _connectBtn.GetComponentInChildren<TMP_Text>().text = "Connect";
         }
 
@@ -100,13 +120,15 @@ namespace Substrate
             // the similar storage calls, which is good for most of the frame pallets, but it might not work due to different
             // frame versions or different orders in the generation proccess.
             string url = string.Empty;
-            switch ((SubstrateChains)dropdown.value)
+            _currentNetwork = (SubstrateChains)dropdown.value;
+            switch (_currentNetwork)
             {
                 case SubstrateChains.Polkadot:
                     {
                         url = "rpc.polkadot.io";
                         _client = new PolkadotExt.SubstrateClientExt(GetUri(url), ChargeTransactionPayment.Default());
                         SystemStorageNumber = ((PolkadotExt.SubstrateClientExt)_client).SystemStorage.Number;
+
                     }
                     break;
 
@@ -158,6 +180,14 @@ namespace Substrate
                     }
                     break;
 
+                case SubstrateChains.NodeTemplate:
+                    {
+                        url = "127.0.0.1:9944";
+                        _client = new NodeTemplateExt.SubstrateClientExt(GetUri(url, false), ChargeTransactionPayment.Default());
+                        SystemStorageNumber = ((NodeTemplateExt.SubstrateClientExt)_client).SystemStorage.Number;
+                    }
+                    break;
+
                 default:
                     Debug.LogError($"Unhandled enumeration value {dropdown.value}!");
                     break;
@@ -175,6 +205,7 @@ namespace Substrate
             _getBlockNumberBtn.enabled = _client.IsConnected;
             _connectBtn.GetComponentInChildren<TMP_Text>().text = _client.IsConnected ? "Disconnect" : "Connect";
             _urlLbl.color = _client.IsConnected ? Color.green : Color.red;
+            _sendBobBtn.enabled = _client.IsConnected && _currentNetwork == SubstrateChains.NodeTemplate;
         }
 
         /// <summary>
@@ -231,6 +262,105 @@ namespace Substrate
             }
 
             _running = false;
+        }
+
+        /// <summary>
+        ///
+        /// </summary>
+        public async void OnSendBobAsync()
+        {
+            if (_running || _client == null || !_client.IsConnected)
+            {
+                return;
+            }
+
+            _running = true;
+
+            var accountAlice = new Substrate.NodeTemplate.NET.NetApiExt.Generated.Model.sp_core.crypto.AccountId32();
+            accountAlice.Create(Utils.GetPublicKeyFrom(Alice.Value));
+
+            var account32 = new Substrate.NodeTemplate.NET.NetApiExt.Generated.Model.sp_core.crypto.AccountId32();
+            account32.Create(Utils.GetPublicKeyFrom("5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"));
+
+            var multiAddress = new Substrate.NodeTemplate.NET.NetApiExt.Generated.Model.sp_runtime.multiaddress.EnumMultiAddress();
+            multiAddress.Create(Substrate.NodeTemplate.NET.NetApiExt.Generated.Model.sp_runtime.multiaddress.MultiAddress.Id, account32);
+
+            var amount = new BaseCom<U128>();
+            amount.Create(new BigInteger(42 * Math.Pow(10, 12)));
+
+            var transferKeepAlive = NodeTemplateExt.Storage.BalancesCalls.TransferKeepAlive(multiAddress, amount);
+
+            try
+            {
+                var subscription = await GenericExtrinsicAsync(_client, Alice, "TransferKeepAlive", transferKeepAlive, CancellationToken.None);
+
+                Debug.Log($"subscription id => {subscription}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError(e.Message);
+            }
+
+            _running = false;
+        }
+
+        /// <summary>
+        ///
+        /// </summary>
+        /// <param name="extrinsicType"></param>
+        /// <param name="extrinsicMethod"></param>
+        /// <param name="concurrentTasks"></param>
+        /// <param name="token"></param>
+        /// <returns></returns>
+        internal async Task<string> GenericExtrinsicAsync(SubstrateClient client, Account account, string extrinsicType, Method extrinsicMethod, CancellationToken token)
+        {
+            string subscription = await client.Author.SubmitAndWatchExtrinsicAsync(ActionExtrinsicUpdate, extrinsicMethod, account, _chargeTypeDefault, 64, token);
+
+            if (subscription == null)
+            {
+                return null;
+            }
+
+            Debug.Log($"Generic extrinsic sent {extrinsicMethod.ModuleName}_{extrinsicMethod.CallName} with {subscription}");
+
+            return subscription;
+        }
+
+        public void ActionExtrinsicUpdate(string subscriptionId, ExtrinsicStatus extrinsicUpdate)
+        {
+            switch (extrinsicUpdate.ExtrinsicState)
+            {
+                case ExtrinsicState.None:
+                    if (extrinsicUpdate.InBlock?.Value.Length > 0)
+                    {
+                        Debug.Log($"{subscriptionId} => InBlock[{extrinsicUpdate.InBlock.Value}]");
+                    }
+                    else if (extrinsicUpdate.Finalized?.Value.Length > 0)
+                    {
+                        Debug.Log($"{subscriptionId} => Finalized[{extrinsicUpdate.Finalized.Value}]");
+                    }
+                    else
+                    {
+                        Debug.Log($"{subscriptionId} => {extrinsicUpdate.ExtrinsicState}");
+                    }
+                    break;
+
+                case ExtrinsicState.Future:
+                    Debug.Log($"{subscriptionId} => {extrinsicUpdate.ExtrinsicState}");
+                    break;
+
+                case ExtrinsicState.Ready:
+                    Debug.Log($"{subscriptionId} => {extrinsicUpdate.ExtrinsicState}");
+                    break;
+
+                case ExtrinsicState.Dropped:
+                    Debug.Log($"{subscriptionId} => {extrinsicUpdate.ExtrinsicState}");
+                    break;
+
+                case ExtrinsicState.Invalid:
+                    Debug.Log($"{subscriptionId} => {extrinsicUpdate.ExtrinsicState}");
+                    break;
+            }
         }
     }
 }
